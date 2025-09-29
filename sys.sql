@@ -9,3 +9,18 @@ temporary tablespace temp;
 
 grant connect, resource, unlimited tablespace
 to scott;
+
+GRANT CREATE VIEW TO SCOTT;
+
+SELECT *
+FROM TAB;
+
+SELECT *
+FROM DBA_USERS
+ORDER BY USERNAME;
+
+SELECT *
+FROM DBA_USERS
+WHERE USERNAME = 'SCOTT';
+
+ALTER USER SCOTT ACCOUNT UNLOCK;
