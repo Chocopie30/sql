@@ -38,6 +38,46 @@ app.get("/", (req, res) => {
   res.send('Root 페이지가 요청');
 });
 
+// 게시글 목록(페이징)
+app.get('/board/:page', async (req, res) => {
+  let page = req.params.page;
+  let connection;
+  try {
+    // 풀 이름으로 커넥션 가져오기
+    connection = await oracledb.getConnection(dbConfig.poolAlias);
+
+    const sql = `SELECT B.*
+                 FROM (SELECT /*+ INDEX(A SYS_C008648) */ ROWNUM RN
+                 ,A.*
+                 FROM BOARD_T A) B
+                 WHERE B.RN > (${page} -1) *10
+                 AND B.RN <= (${page} *10)`;
+    console.log(sql);
+    // SQL쿼리 실행
+    const result = await connection.execute(sql);
+    console.log(result);
+
+    // 조회된 데이터를 JSON 형식으로 응답
+    res.status(200).json(result.rows);
+  } catch (err) {
+    console.error("Error executing query:", err);
+    res.status(500).json({
+      error: "데이터 조회 중 오류가 발생했습니다",
+      detail: err.message
+    });
+  } finally {
+    if (connection) {
+      try {
+        //커넥션 반환
+        await connection.close();
+      } catch (err) {
+        console.error("Error closing connection:", err);
+      }
+    }
+  }
+});
+
+// 사원등록
 app.post('/emp', async (req, res) => {
   // res.send("Root 페이지가 요청");
   console.log(req.body)

@@ -1,16 +1,19 @@
-select username from all_users;
+select username from all_users order by username;
 
 alter session set "_ORACLE_SCRIPT"=true;
 
-create user scott
-identified by tiger
+--user만들기
+create user hr
+identified by hr
 default tablespace users
 temporary tablespace temp;
 
+-- 권한주기
 grant connect, resource, unlimited tablespace
-to scott;
+to hr;
 
-GRANT CREATE VIEW TO SCOTT;
+-- 뷰만들기 권한 주기
+GRANT CREATE VIEW TO hr;
 
 SELECT *
 FROM TAB;

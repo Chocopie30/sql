@@ -1,0 +1,32 @@
+-- 게시글 삭제 됐을 때 순서때문에 사용
+SELECT ROWNUM
+      ,B.*
+FROM BOARD_T B
+ORDER BY BOARD_NO;
+
+DELETE FROM BOARD_T WHERE BOARD_NO = 3;
+
+--INLINE VIEW
+SELECT ROWNUM RN
+      ,A.*
+FROM (SELECT B.*
+      FROM BOARD_T B
+      ORDER BY BOARD_NO) A;
+
+-- 1PAGE: 1~10, 2PAGE: 11~20,...
+SELECT B.*
+FROM (SELECT /*+ INDEX(A SYS_C008648) */ ROWNUM RN
+      ,A.*
+      FROM BOARD_T A) B
+WHERE B.RN > (:PAGE-1) *10
+AND B.RN <= (:PAGE *10);
+
+-- WRITE_DATE 순서대로 인덱스 만듦 / 그냥 WRITE_DATE로 ODER BY 하는거 보다 조금 속도 빠름
+CREATE INDEX BOARD_WRITE_DATE_IDX
+ON BOARD_T(WRITE_DATE);
+
+-- /*+ INDEX(B 지정한 이름) */ ODER BY를 대체
+SELECT /*+ INDEX(B SYS_C008648) */ B.*
+FROM BOARD_T B;
+
+commit;
