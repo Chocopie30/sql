@@ -134,24 +134,29 @@ app.post('/user', async (req, res) => {
   }
 });
 
-//로그인
+// 로그인
 app.post('/login', async (req, res) => {
-  const {
-    userId,
-    userPw
-  } = req.body;
+  const { userId, userPw } = req.body;
   let connection;
 
+  if (!userId || !userPw) {
+    return res.status(400).json({
+      success: false,
+      message: "아이디와 비밀번호를 모두 입력해 주세요."
+    });
+  }
+
   try {
-    // 🔹 단일 커넥션 방식
+    // 풀 alias로 커넥션 획득
     connection = await oracledb.getConnection(dbConfig.poolAlias);
 
-    // 🔹 아이디로 DB 조회
+    // 아이디로 조회 (비번/이름 함께 가져오기)
     const result = await connection.execute(
-      `SELECT userPw FROM user_table WHERE userId = :id`,
-      [userId], {
-        outFormat: oracledb.OUT_FORMAT_OBJECT
-      } // 객체 형식 반환
+      `SELECT userPw, userName
+         FROM user_table
+        WHERE userId = :id`,
+      { id: userId },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
     );
 
     if (result.rows.length === 0) {
@@ -162,12 +167,15 @@ app.post('/login', async (req, res) => {
       });
     }
 
-    // 🔹 DB에서 가져온 비밀번호 (공백 제거)
-    const dbPw = result.rows[0].USERPW.trim(); // 객체 형식이므로 키 이름 확인
+    const row   = result.rows[0];
+    const dbPw  = (row.USERPW || "").trim();     // 혹시 모를 공백 제거
+    const name  = (row.USERNAME || "").trim();
 
     if (dbPw === userPw) {
+      // ✅ 로그인 성공 시 userName도 함께 반환
       return res.json({
-        success: true
+        success: true,
+        userName: name
       });
     } else {
       return res.json({
@@ -191,6 +199,213 @@ app.post('/login', async (req, res) => {
         console.log("Connection close error:", err);
       }
     }
+  }
+});
+
+
+// 아이디 찾기: POST /user/find-id
+app.post("/user/find-id", async (req, res) => {
+  const userName = (req.body?.userName || "").trim();
+  const userTel  = (req.body?.userTel  || "").trim();
+
+  if (!userName || !userTel) {
+    return res.status(400).json({ success:false, message:"이름과 전화번호를 모두 입력해 주세요." });
+  }
+
+  let connection;
+  try {
+    connection = await oracledb.getConnection(dbConfig.poolAlias);
+
+    const result = await connection.execute(
+      `SELECT userId 
+         FROM user_table 
+        WHERE userName = :userName 
+          AND userTel  = :userTel`,
+      { userName, userTel },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({
+        success: false,
+        message: "일치하는 회원정보가 없습니다. 회원가입을 하거나 다시 입력해 주세요."
+      });
+    }
+
+    const userId = result.rows[0].USERID;
+    return res.json({ success: true, userId });
+  } catch (err) {
+    console.error("find-id error:", err);
+    return res.status(500).json({ success:false, message:"서버 오류", detail: err.message });
+  } finally {
+    if (connection) try { await connection.close(); } catch(e) { console.log(e); }
+  }
+});
+
+
+
+// 비밀번호 찾기: POST /user/find-pw
+app.post("/user/find-pw", async (req, res) => {
+  const userId   = (req.body?.userId   || "").trim();
+  const userName = (req.body?.userName || "").trim();
+
+  if (!userId || !userName) {
+    return res.status(400).json({ success:false, message:"아이디와 이름을 모두 입력해 주세요." });
+  }
+
+  let connection;
+  try {
+    connection = await oracledb.getConnection(dbConfig.poolAlias);
+
+    const result = await connection.execute(
+      `SELECT userPw 
+         FROM user_table 
+        WHERE userId   = :userId 
+          AND userName = :userName`,
+      { userId, userName },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({
+        success: false,
+        message: "일치하는 회원정보가 없습니다. 다시 입력해 주세요."
+      });
+    }
+
+    // ⚠️ 실제 운영에서는 비밀번호를 그대로 반환하면 안 됩니다.
+    //     임시 비밀번호 발급/재설정 링크 메일 전송 등을 권장합니다.
+    const userPw = (result.rows[0].USERPW || "").trim();
+
+    return res.json({ success: true, userPw });
+  } catch (err) {
+    console.error("find-pw error:", err);
+    return res.status(500).json({ success:false, message:"서버 오류", detail: err.message });
+  } finally {
+    if (connection) try { await connection.close(); } catch(e) { console.log(e); }
+  }
+});
+
+// 회원 프로필 조회
+// GET /user/profile?userId=abc
+app.get("/user/profile", async (req, res) => {
+  const userId = (req.query?.userId || "").trim();
+  if (!userId) {
+    return res.status(400).json({ success:false, message:"userId가 필요합니다." });
+  }
+
+  let connection;
+  try {
+    connection = await oracledb.getConnection(dbConfig.poolAlias);
+    const result = await connection.execute(
+      `SELECT userId, userName, userTel, userAddress
+         FROM user_table
+        WHERE userId = :userId`,
+      { userId },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ success:false, message:"존재하지 않는 회원입니다." });
+    }
+
+    const row = result.rows[0];
+    // 보안상 userPw는 반환하지 않음
+    res.json({
+      success: true,
+      data: {
+        userId: row.USERID,
+        userName: row.USERNAME,
+        userTel: row.USERTEL,
+        userAddress: row.USERADDRESS
+      }
+    });
+  } catch (err) {
+    console.error("profile get error:", err);
+    res.status(500).json({ success:false, message:"서버 오류", detail: err.message });
+  } finally {
+    if (connection) try { await connection.close(); } catch(e) {}
+  }
+});
+
+
+// 회원 프로필 수정
+app.put("/user/profile", async (req, res) => {
+  const userId      = (req.body?.userId || "").trim();
+  const userName    = (req.body?.userName || "").trim();
+  const userTel     = (req.body?.userTel || "").trim();
+  const userAddress = (req.body?.userAddress || "").trim();
+  const userPw      = (req.body?.userPw || "").trim(); // 선택
+
+  if (!userId || !userName || !userTel || !userAddress) {
+    return res.status(400).json({ success:false, message:"userId, userName, userTel, userAddress는 필수입니다." });
+  }
+
+  // 전화번호 간단 검증 (프론트와 동일)
+  const telRe = /^0\d{1,2}-\d{3,4}-\d{4}$/;
+  if (!telRe.test(userTel)) {
+    return res.status(400).json({ success:false, message:"전화번호 형식이 올바르지 않습니다. 예) 010-1234-5678" });
+  }
+
+  let connection;
+  try {
+    connection = await oracledb.getConnection(dbConfig.poolAlias);
+
+    // userTel UNIQUE 제약 위배 체크 (본인 제외)
+    const dupTel = await connection.execute(
+      `SELECT COUNT(*) AS CNT
+         FROM user_table
+        WHERE userTel = :userTel
+          AND userId <> :userId`,
+      { userTel, userId },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    if (dupTel.rows[0].CNT > 0) {
+      return res.json({ success:false, message:"이미 사용 중인 전화번호입니다." });
+    }
+
+    // 동적 업데이트: 비번이 있으면 비번도 수정
+    let sql;
+    let binds;
+    if (userPw) {
+      sql = `
+        UPDATE user_table
+           SET userPw = :userPw,
+               userName = :userName,
+               userTel = :userTel,
+               userAddress = :userAddress
+         WHERE userId = :userId
+      `;
+      binds = { userPw, userName, userTel, userAddress, userId };
+    } else {
+      sql = `
+        UPDATE user_table
+           SET userName = :userName,
+               userTel = :userTel,
+               userAddress = :userAddress
+         WHERE userId = :userId
+      `;
+      binds = { userName, userTel, userAddress, userId };
+    }
+
+    const result = await connection.execute(sql, binds, { autoCommit: true });
+
+    if (!result.rowsAffected) {
+      return res.json({ success:false, message:"수정할 회원이 존재하지 않습니다." });
+    }
+
+    res.json({ success:true });
+  } catch (err) {
+    console.error("profile put error:", err);
+
+    // UNIQUE 제약(전화번호 등) 위배시 ORA-00001
+    if (String(err.message).includes("ORA-00001")) {
+      return res.json({ success:false, message:"중복된 정보가 있습니다. (전화번호 등)" });
+    }
+
+    res.status(500).json({ success:false, message:"서버 오류", detail: err.message });
+  } finally {
+    if (connection) try { await connection.close(); } catch(e) {}
   }
 });
 
@@ -633,64 +848,202 @@ WHERE p.prodNo = :prodNo
   }
 });
 
-// 상품 수정
-app.put("/products/:prodNo", async (req, res) => {
-  const {
-    prodNo
-  } = req.params;
-  const {
-    prodName,
-    prodDes,
-    prodCate,
-    prodCount,
-    prodPrice
-  } = req.body;
+const fs = require("fs/promises");
 
+// 상품 수정 (텍스트 + 이미지 교체)
+app.put("/products/:prodNo", upload.single("productImage"), async (req, res) => {
+  const prodNo = Number(req.params.prodNo);
+
+  // multer가 파싱한 필드
+  const prodName  = (req.body?.prodName  || "").trim();
+  const prodDes   = (req.body?.prodDes   || "").trim();
+  const prodCate  = Number(req.body?.prodCate);
+  const prodCount = Number(req.body?.prodCount);
+  const prodPrice = Number(req.body?.prodPrice);
+  const requester = (req.body?.loggedInUser || "").trim(); // 소유자 검증 용
+
+  // 새로 업로드된 파일(선택)
+  const imgPath = req.file ? `js/project/img/${req.file.filename}` : null;
+
+  if (!prodName || !prodDes || !prodCate || isNaN(prodCount) || isNaN(prodPrice)) {
+    return res.status(400).json({ success:false, message:"필수 값이 누락되었습니다." });
+  }
+
+  let connection;
   try {
-    const connection = await oracledb.getConnection(dbConfig);
+    connection = await oracledb.getConnection(dbConfig.poolAlias);
 
-    const sql = `
-      UPDATE product_table
-      SET prodName = :prodName,
-          prodDes = :prodDes,
-          prodCate = :prodCate,
-          prodCount = :prodCount,
-          prodPrice = :prodPrice
-      WHERE prodNo = :prodNo
-    `;
-
-    const result = await connection.execute(sql, {
-      prodName,
-      prodDes,
-      prodCate,
-      prodCount,
-      prodPrice,
-      prodNo
-    }, {
-      autoCommit: true
-    });
-
-    await connection.close();
-
-    if (result.rowsAffected > 0) {
-      res.json({
-        success: true
-      });
-    } else {
-      res.json({
-        success: false,
-        message: "상품 수정 실패 (존재하지 않음)"
-      });
+    // 0) 소유자 검증(선택) — 프론트에서 보낸 로그인아이디와 DB 판매자 일치 확인
+    if (requester) {
+      const own = await connection.execute(
+        `SELECT prodSeller FROM product_table WHERE prodNo = :prodNo`,
+        { prodNo },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      if (own.rows.length === 0) {
+        return res.status(404).json({ success:false, message:"상품이 존재하지 않습니다." });
+      }
+      const dbSeller = own.rows[0].PRODSELLER;
+      if (dbSeller !== requester) {
+        return res.status(403).json({ success:false, message:"수정 권한이 없습니다." });
+      }
     }
+
+    // 트랜잭션 시작
+    await connection.execute("BEGIN NULL; END;");
+
+    // 1) 기본 정보 업데이트
+    const upd = await connection.execute(
+      `
+      UPDATE product_table
+         SET prodName  = :prodName,
+             prodDes   = :prodDes,
+             prodCate  = :prodCate,
+             prodCount = :prodCount,
+             prodPrice = :prodPrice
+       WHERE prodNo    = :prodNo
+      `,
+      { prodName, prodDes, prodCate, prodCount, prodPrice, prodNo }
+    );
+
+    if (!upd.rowsAffected) {
+      await connection.rollback();
+      return res.json({ success:false, message:"상품 수정 실패 (존재하지 않음)" });
+    }
+
+    // 2) 이미지 교체가 요청된 경우
+    if (imgPath) {
+      // 기존 이미지 목록을 미리 가져와서, DB 삭제 후 커밋 성공 시 파일도 삭제(선택)
+      const oldImgs = await connection.execute(
+        `SELECT imgPath FROM product_image_table WHERE prodNo = :prodNo`,
+        { prodNo },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      const oldPaths = oldImgs.rows.map(r => r.IMGPATH);
+
+      // 기존 이미지 레코드 삭제
+      await connection.execute(
+        `DELETE FROM product_image_table WHERE prodNo = :prodNo`,
+        { prodNo }
+      );
+
+      // 새 이미지 1건 삽입 (단일 이미지 정책)
+      await connection.execute(
+        `
+        INSERT INTO product_image_table (imgNo, prodNo, imgPath)
+        VALUES (product_img_seq.NEXTVAL, :prodNo, :imgPath)
+        `,
+        { prodNo, imgPath }
+      );
+
+      // 모두 OK면 커밋
+      await connection.commit();
+
+      // (선택) 기존 파일 삭제 시도 — 커밋 이후에 실행
+      for (const p of oldPaths) {
+        try {
+          // static 루트 기준 경로를 실제 디스크 경로로 변환
+          const absolute = path.join(__dirname, "../../web-master/public", p);
+          await fs.unlink(absolute);
+        } catch (_) { /* 파일 없을 수 있음 - 무시 */ }
+      }
+    } else {
+      // 이미지 변경 없음 → 기본정보만 변경 커밋
+      await connection.commit();
+    }
+
+    return res.json({ success:true });
   } catch (err) {
     console.error("상품 수정 오류:", err);
-    res.status(500).json({
-      success: false,
-      message: "서버 오류"
-    });
+    try { if (connection) await connection.rollback(); } catch {}
+    return res.status(500).json({ success:false, message:"서버 오류", detail: err.message });
+  } finally {
+    if (connection) try { await connection.close(); } catch(e) {}
   }
 });
 
+// 상품 삭제: DELETE /products/:prodNo
+// 요청 본문(body): { seller: "로그인한 사용자 ID" }
+app.delete("/products/:prodNo", async (req, res) => {
+  const prodNo = Number(req.params.prodNo);
+  const seller = req.body?.seller;
+
+  if (!seller) {
+    return res.status(400).json({
+      success: false,
+      message: "요청자 정보(seller)가 필요합니다."
+    });
+  }
+
+  let connection;
+  try {
+    // ✅ 풀 alias로 커넥션 획득 (initialize()에서 APP_POOL 생성)
+    connection = await oracledb.getConnection(dbConfig.poolAlias);
+
+    // 1) 소유자 확인
+    const sel = await connection.execute(
+      `SELECT prodSeller FROM product_table WHERE prodNo = :prodNo`,
+      { prodNo },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+
+    if (sel.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "해당 상품이 존재하지 않습니다."
+      });
+    }
+
+    const dbSeller = sel.rows[0].PRODSELLER;
+    if (dbSeller !== seller) {
+      return res.status(403).json({
+        success: false,
+        message: "삭제 권한이 없습니다. (판매자 불일치)"
+      });
+    }
+
+    // 2) 이미지 선삭제 (ON DELETE CASCADE가 없기 때문)
+    await connection.execute(
+      `DELETE FROM product_image_table WHERE prodNo = :prodNo`,
+      { prodNo }
+    );
+
+    // 3) 상품 삭제
+    const del = await connection.execute(
+      `DELETE FROM product_table WHERE prodNo = :prodNo`,
+      { prodNo }
+    );
+
+    if (!del.rowsAffected) {
+      return res.status(500).json({
+        success: false,
+        message: "상품 삭제에 실패했습니다."
+      });
+    }
+
+    // 커밋
+    await connection.commit();
+
+    return res.json({
+      success: true,
+      data: { prodNo },
+      message: "상품이 성공적으로 삭제되었습니다."
+    });
+  } catch (err) {
+    console.error("상품 삭제 오류:", err);
+    // 실패 시 롤백 시도
+    try { if (connection) await connection.rollback(); } catch (_) {}
+    return res.status(500).json({
+      success: false,
+      message: "상품 삭제 중 서버 오류가 발생했습니다.",
+      detail: err.message
+    });
+  } finally {
+    if (connection) {
+      try { await connection.close(); } catch (e) { console.log("Connection close error:", e); }
+    }
+  }
+});
 
 
 // 주문 등록 + 재고 차감
@@ -776,7 +1129,7 @@ app.post("/orders", async (req, res) => {
   }
 });
 
-// ----------------- 주문 내역 조회 -----------------
+//주문 내역 조회
 app.get("/orders", async (req, res) => {
   let connection;
 
