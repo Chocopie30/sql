@@ -553,7 +553,7 @@ app.post("/answer", async (req, res) => {
   }
 
   try {
-    const connection = await oracledb.getConnection(dbConfig);
+    const connection = await oracledb.getConnection(dbConfig.poolAlias);
     await connection.execute(
       `INSERT INTO answer_table (aNo, aContent, aWriter)
        VALUES (:qNo, :aContent, :aWriter)`, {
@@ -585,7 +585,7 @@ app.post("/products", upload.single("productImage"), async (req, res) => {
     const { prodName, prodDes, prodCate, prodCount, prodPrice, prodSeller } = req.body;
     const imgPath = req.file ? `js/project/img/${req.file.filename}` : null;
 
-    connection = await oracledb.getConnection(dbConfig);
+    connection = await oracledb.getConnection(dbConfig.poolAlias);
 
     // 1) 상품 기본 정보 저장 후 prodNo 가져오기
     const result = await connection.execute(
@@ -647,7 +647,7 @@ app.get("/products/search", async (req, res) => {
   const keyword = req.query.keyword;
 
   try {
-    const connection = await oracledb.getConnection(dbConfig);
+    const connection = await oracledb.getConnection(dbConfig.poolAlias);
     const result = await connection.execute(
       `SELECT p.prodNo, p.prodName, p.prodCate, p.prodPrice, p.prodCount,
               NVL(i.imgPath, 'js/project/img/default.png') as imgPath
@@ -963,66 +963,62 @@ app.put("/products/:prodNo", upload.single("productImage"), async (req, res) => 
 });
 
 // 상품 삭제: DELETE /products/:prodNo
-// 요청 본문(body): { seller: "로그인한 사용자 ID" }
+// body: { seller: "로그인ID" }
 app.delete("/products/:prodNo", async (req, res) => {
   const prodNo = Number(req.params.prodNo);
   const seller = req.body?.seller;
 
   if (!seller) {
-    return res.status(400).json({
-      success: false,
-      message: "요청자 정보(seller)가 필요합니다."
-    });
+    return res.status(400).json({ success: false, message: "요청자 정보(seller)가 필요합니다." });
   }
 
-  let connection;
+  let conn;
   try {
-    // ✅ 풀 alias로 커넥션 획득 (initialize()에서 APP_POOL 생성)
-    connection = await oracledb.getConnection(dbConfig.poolAlias);
+    conn = await oracledb.getConnection(dbConfig.poolAlias);
 
-    // 1) 소유자 확인
-    const sel = await connection.execute(
+    // 0) 판매자 권한 확인
+    const sel = await conn.execute(
       `SELECT prodSeller FROM product_table WHERE prodNo = :prodNo`,
       { prodNo },
       { outFormat: oracledb.OUT_FORMAT_OBJECT }
     );
-
     if (sel.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "해당 상품이 존재하지 않습니다."
-      });
+      return res.status(404).json({ success: false, message: "해당 상품이 존재하지 않습니다." });
+    }
+    if (sel.rows[0].PRODSELLER !== seller) {
+      return res.status(403).json({ success: false, message: "삭제 권한이 없습니다. (판매자 불일치)" });
     }
 
-    const dbSeller = sel.rows[0].PRODSELLER;
-    if (dbSeller !== seller) {
-      return res.status(403).json({
-        success: false,
-        message: "삭제 권한이 없습니다. (판매자 불일치)"
-      });
-    }
+    // 트랜잭션 시작 (명시적으로 autoCommit 끄고 진행)
+    await conn.execute("BEGIN NULL; END;");
 
-    // 2) 이미지 선삭제 (ON DELETE CASCADE가 없기 때문)
-    await connection.execute(
+    // 1) 이미지(자식) 삭제
+    await conn.execute(
       `DELETE FROM product_image_table WHERE prodNo = :prodNo`,
       { prodNo }
     );
 
-    // 3) 상품 삭제
-    const del = await connection.execute(
+    // 2) 주문(자식) 삭제  ← ★ 이 부분이 기존 코드에 없었음
+    await conn.execute(
+      `DELETE FROM order_table WHERE prodNo = :prodNo`,
+      { prodNo }
+    );
+
+    // 필요시: 장바구니/리뷰 등 다른 자식 테이블도 여기서 먼저 삭제
+    // await conn.execute(`DELETE FROM cart_table WHERE prodNo = :prodNo`, { prodNo });
+    // await conn.execute(`DELETE FROM review_table WHERE prodNo = :prodNo`, { prodNo });
+
+    // 3) 상품(부모) 삭제
+    const del = await conn.execute(
       `DELETE FROM product_table WHERE prodNo = :prodNo`,
       { prodNo }
     );
 
-    if (!del.rowsAffected) {
-      return res.status(500).json({
-        success: false,
-        message: "상품 삭제에 실패했습니다."
-      });
-    }
+    await conn.commit();
 
-    // 커밋
-    await connection.commit();
+    if (!del.rowsAffected) {
+      return res.status(500).json({ success: false, message: "상품 삭제에 실패했습니다." });
+    }
 
     return res.json({
       success: true,
@@ -1030,20 +1026,18 @@ app.delete("/products/:prodNo", async (req, res) => {
       message: "상품이 성공적으로 삭제되었습니다."
     });
   } catch (err) {
+    if (conn) { try { await conn.rollback(); } catch (_) {} }
     console.error("상품 삭제 오류:", err);
-    // 실패 시 롤백 시도
-    try { if (connection) await connection.rollback(); } catch (_) {}
     return res.status(500).json({
       success: false,
       message: "상품 삭제 중 서버 오류가 발생했습니다.",
       detail: err.message
     });
   } finally {
-    if (connection) {
-      try { await connection.close(); } catch (e) { console.log("Connection close error:", e); }
-    }
+    if (conn) { try { await conn.close(); } catch (e) { console.log("Connection close error:", e); } }
   }
 });
+
 
 
 // 주문 등록 + 재고 차감
@@ -1189,7 +1183,7 @@ const port = 3000;
 // 서버 시작 전에 initialize()를 완료하고, 성공 했을 때만 listen() 실행
 async function startServer() {
   await initialize();
-  app.listen(port, () => {
+  app.listen(port,'0.0.0.0',() => {
     console.log(`Server is listening on http://localhost:${port}`);
   });
 }
